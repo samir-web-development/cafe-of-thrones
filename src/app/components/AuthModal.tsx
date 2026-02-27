@@ -1,79 +1,137 @@
 import React, { useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { X, Mail, Lock, User as UserIcon } from "lucide-react";
+import { X, Phone, ShieldCheck } from "lucide-react";
 import { supabase } from "../../lib/supabaseClient";
+import OtpInput from 'react-otp-input';
 
 interface AuthModalProps {
     isOpen: boolean;
     onClose: () => void;
 }
 
+type AuthStep = 'PHONE_INPUT' | 'OTP_INPUT' | 'PROFILE_COMPLETION';
+
 export function AuthModal({ isOpen, onClose }: AuthModalProps) {
-    const [isLogin, setIsLogin] = useState(true);
-    const [email, setEmail] = useState("");
-    const [password, setPassword] = useState("");
+    const [step, setStep] = useState<AuthStep>('PHONE_INPUT');
+    const [phone, setPhone] = useState("");
+    const [otp, setOtp] = useState("");
     const [fullName, setFullName] = useState("");
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
-    // Reset state when mode switches
-    const toggleMode = () => {
-        setIsLogin(!isLogin);
-        setError(null);
-        setPassword("");
+    // Format phone number string for basic validation (+91 default if none provided)
+    const formatPhoneForSupabase = (number: string) => {
+        const clean = number.replace(/\D/g, '');
+        if (clean.length === 10) return `+91${clean}`;
+        if (!number.startsWith('+')) return `+${clean}`;
+        return number;
     };
 
-    const handleSubmit = async (e: React.FormEvent) => {
+    const handleSendOTP = async (e: React.FormEvent) => {
         e.preventDefault();
         setLoading(true);
         setError(null);
 
         try {
-            if (isLogin) {
-                const { error } = await supabase.auth.signInWithPassword({
-                    email,
-                    password,
-                });
-                if (error) throw error;
-                onClose(); // Close modal on success
-            } else {
-                const { error } = await supabase.auth.signUp({
-                    email,
-                    password,
-                    options: {
-                        data: {
-                            full_name: fullName,
-                        },
-                    },
-                });
-                if (error) throw error;
-                // Supabase signup sometimes requires email confirmation depending on settings
-                // For now we assume success means we can close or tell user to check email
-                onClose();
-            }
+            const formattedPhone = formatPhoneForSupabase(phone);
+            const { error } = await supabase.auth.signInWithOtp({
+                phone: formattedPhone,
+            });
+            if (error) throw error;
+            setStep('OTP_INPUT');
         } catch (err: any) {
-            setError(err.message || "An error occurred during authentication.");
+            setError(err.message || "Failed to send OTP to this number.");
         } finally {
             setLoading(false);
         }
     };
 
-    const handleGoogleLogin = async () => {
+    const handleVerifyOTP = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (otp.length !== 6) {
+            setError("Please enter the 6-digit code.");
+            return;
+        }
+
         setLoading(true);
         setError(null);
+
         try {
-            const { error } = await supabase.auth.signInWithOAuth({
-                provider: 'google',
-                options: {
-                    redirectTo: window.location.origin, // Redirects back to the app after login
-                }
+            const formattedPhone = formatPhoneForSupabase(phone);
+            const { data, error } = await supabase.auth.verifyOtp({
+                phone: formattedPhone,
+                token: otp,
+                type: 'sms',
             });
+
             if (error) throw error;
-            // Note: The page will automatically redirect to Google, so we don't call onClose() or setLoading(false) here.
+
+            // Wait a brief moment for the trigger to insert the profile
+            await new Promise(resolve => setTimeout(resolve, 500));
+
+            // Check if profile exists and has the placeholder name
+            const { data: profile } = await supabase
+                .from('profiles')
+                .select('full_name')
+                .eq('id', data.user?.id)
+                .single();
+
+            if (!profile?.full_name || profile.full_name.trim() === '') {
+                // Must complete profile
+                setStep('PROFILE_COMPLETION');
+            } else {
+                // Return user to browsing
+                resetAndClose();
+            }
+
         } catch (err: any) {
-            setError(err.message || "An error occurred with Google Login.");
+            setError(err.message || "Invalid OTP code.");
+        } finally {
             setLoading(false);
         }
+    };
+
+    const handleCompleteProfile = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setLoading(true);
+        setError(null);
+
+        try {
+            const { data: { user } } = await supabase.auth.getUser();
+            if (!user) throw new Error("Authentication failed during profile save.");
+
+            // Update their name to overwrite the placeholder
+            const { error: updateError } = await supabase
+                .from('profiles')
+                .update({ full_name: fullName })
+                .eq('id', user.id);
+
+            if (updateError) throw updateError;
+
+            // Apply the welcome reward 
+            const { error: rewardError } = await supabase
+                .from('profiles')
+                .update({ loyalty_points: 50, welcome_reward_given: true })
+                .eq('id', user.id)
+                .eq('welcome_reward_given', false); // Ensure only applied if false
+
+            // We silently ignore rewardError so it doesn't block them if something weird happens with points
+
+            resetAndClose();
+        } catch (err: any) {
+            setError(err.message || "Could not save your profile. Try again.");
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const resetAndClose = () => {
+        setStep('PHONE_INPUT');
+        setPhone("");
+        setOtp("");
+        setFullName("");
+        setError(null);
+        onClose();
     };
 
     return (
@@ -85,7 +143,9 @@ export function AuthModal({ isOpen, onClose }: AuthModalProps) {
                         initial={{ opacity: 0 }}
                         animate={{ opacity: 1 }}
                         exit={{ opacity: 0 }}
-                        onClick={onClose}
+                        onClick={() => {
+                            if (step !== 'PROFILE_COMPLETION') resetAndClose();
+                        }}
                         className="fixed inset-0 bg-[#3d1f00]/60 backdrop-blur-sm z-50"
                     />
 
@@ -100,14 +160,16 @@ export function AuthModal({ isOpen, onClose }: AuthModalProps) {
                         <div className="h-32 bg-[#2a1500] relative flex items-center justify-center overflow-hidden">
                             <div className="absolute inset-0 opacity-20 bg-[url('https://images.unsplash.com/photo-1497935586351-b67a49e012bf?auto=format&fit=crop&q=80')] bg-cover bg-center mix-blend-overlay"></div>
                             <h2 className="text-3xl font-bold text-[#fdf6ec] relative z-10" style={{ letterSpacing: "1px" }}>
-                                {isLogin ? "Welcome Back" : "Join the Cafe"}
+                                {step === 'PROFILE_COMPLETION' ? 'Welcome to Cafe' : 'Login / Register'}
                             </h2>
-                            <button
-                                onClick={onClose}
-                                className="absolute top-4 right-4 text-[#fdf6ec]/80 hover:text-white transition-colors z-10 p-1"
-                            >
-                                <X size={24} />
-                            </button>
+                            {step !== 'PROFILE_COMPLETION' && (
+                                <button
+                                    onClick={resetAndClose}
+                                    className="absolute top-4 right-4 text-[#fdf6ec]/80 hover:text-white transition-colors z-10 p-1"
+                                >
+                                    <X size={24} />
+                                </button>
+                            )}
                         </div>
 
                         {/* Form Area */}
@@ -118,93 +180,109 @@ export function AuthModal({ isOpen, onClose }: AuthModalProps) {
                                 </div>
                             )}
 
-                            <form onSubmit={handleSubmit} className="flex flex-col gap-5">
-                                {!isLogin && (
+                            {/* --- STEP 1: PHONE INPUT --- */}
+                            {step === 'PHONE_INPUT' && (
+                                <form onSubmit={handleSendOTP} className="flex flex-col gap-5">
+                                    <div className="text-center mb-2 text-[#7a5c3e] text-sm">
+                                        Enter your mobile number to receive an active code.
+                                    </div>
                                     <div className="relative">
                                         <div className="absolute left-3 top-1/2 -translate-y-1/2 text-[#b09070]">
-                                            <UserIcon size={20} />
+                                            <Phone size={20} />
                                         </div>
+                                        <input
+                                            type="tel"
+                                            required
+                                            value={phone}
+                                            onChange={(e) => setPhone(e.target.value)}
+                                            placeholder="e.g. 9876543210"
+                                            className="w-full bg-white border border-[#e8d9c8] rounded-xl py-3 pl-11 pr-4 text-[#3d1f00] placeholder-[#b09070] focus:outline-none focus:ring-2 focus:ring-[#ECB159] focus:border-transparent transition-all tracking-wide font-medium"
+                                        />
+                                    </div>
+                                    <button
+                                        type="submit"
+                                        disabled={loading || phone.length < 10}
+                                        className="w-full bg-[#ECB159] hover:bg-[#d49a3d] text-white py-3.5 rounded-xl font-bold transition-all active:scale-[0.98] shadow-sm mt-2 disabled:opacity-70 disabled:cursor-not-allowed"
+                                    >
+                                        {loading ? "Sending OTP..." : "Get OTP"}
+                                    </button>
+                                </form>
+                            )}
+
+                            {/* --- STEP 2: OTP VERIFICATION --- */}
+                            {step === 'OTP_INPUT' && (
+                                <form onSubmit={handleVerifyOTP} className="flex flex-col gap-6">
+                                    <div className="text-center text-[#7a5c3e] text-sm">
+                                        We sent a 6-digit code to <span className="font-bold text-[#3d1f00]">{phone}</span>
+                                    </div>
+
+                                    <div className="flex justify-center">
+                                        <OtpInput
+                                            value={otp}
+                                            onChange={setOtp}
+                                            numInputs={6}
+                                            renderSeparator={<span className="w-2"></span>}
+                                            renderInput={(props) => (
+                                                <input
+                                                    {...props}
+                                                    style={{ width: "45px" }}
+                                                    className="h-12 border border-[#e8d9c8] bg-white rounded-lg text-center font-bold text-xl text-[#3d1f00] focus:outline-none focus:ring-2 focus:ring-[#ECB159]"
+                                                />
+                                            )}
+                                        />
+                                    </div>
+
+                                    <button
+                                        type="submit"
+                                        disabled={loading || otp.length < 6}
+                                        className="w-full bg-[#ECB159] hover:bg-[#d49a3d] text-white py-3.5 rounded-xl font-bold transition-all active:scale-[0.98] shadow-sm mt-2 disabled:opacity-70 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                                    >
+                                        <ShieldCheck size={20} />
+                                        {loading ? "Verifying..." : "Verify & Login"}
+                                    </button>
+
+                                    <button
+                                        type="button"
+                                        disabled={loading}
+                                        onClick={() => { setStep('PHONE_INPUT'); setOtp(''); setError(null); }}
+                                        className="text-[#7a5c3e] text-sm font-semibold hover:text-[#3d1f00] text-center"
+                                    >
+                                        Edit phone number
+                                    </button>
+                                </form>
+                            )}
+
+                            {/* --- STEP 3: PROFILE COMPLETION --- */}
+                            {step === 'PROFILE_COMPLETION' && (
+                                <form onSubmit={handleCompleteProfile} className="flex flex-col gap-5">
+                                    <div className="text-center mb-4">
+                                        <h3 className="text-lg font-bold text-[#3d1f00] mb-2">You're almost done!</h3>
+                                        <p className="text-[#7a5c3e] text-sm">
+                                            What should we call you? Completing your profile unlocks your <strong className="text-[#ECB159]">first order discount</strong>.
+                                        </p>
+                                    </div>
+
+                                    <div className="relative">
                                         <input
                                             type="text"
                                             required
-                                            placeholder="Full Name"
                                             value={fullName}
                                             onChange={(e) => setFullName(e.target.value)}
-                                            className="w-full bg-white border border-[#e8d9c8] rounded-xl py-3 pl-11 pr-4 text-[#3d1f00] placeholder-[#b09070] focus:outline-none focus:ring-2 focus:ring-[#ECB159] focus:border-transparent transition-all"
+                                            placeholder="Your Full Name"
+                                            className="w-full bg-white border border-[#e8d9c8] rounded-xl py-3 px-4 text-[#3d1f00] placeholder-[#b09070] focus:outline-none focus:ring-2 focus:ring-[#ECB159] focus:border-transparent transition-all font-medium text-center"
                                         />
                                     </div>
-                                )}
 
-                                <div className="relative">
-                                    <div className="absolute left-3 top-1/2 -translate-y-1/2 text-[#b09070]">
-                                        <Mail size={20} />
-                                    </div>
-                                    <input
-                                        type="email"
-                                        required
-                                        placeholder="Email Address"
-                                        value={email}
-                                        onChange={(e) => setEmail(e.target.value)}
-                                        className="w-full bg-white border border-[#e8d9c8] rounded-xl py-3 pl-11 pr-4 text-[#3d1f00] placeholder-[#b09070] focus:outline-none focus:ring-2 focus:ring-[#ECB159] focus:border-transparent transition-all"
-                                    />
-                                </div>
-
-                                <div className="relative">
-                                    <div className="absolute left-3 top-1/2 -translate-y-1/2 text-[#b09070]">
-                                        <Lock size={20} />
-                                    </div>
-                                    <input
-                                        type="password"
-                                        required
-                                        placeholder="Password"
-                                        value={password}
-                                        onChange={(e) => setPassword(e.target.value)}
-                                        className="w-full bg-white border border-[#e8d9c8] rounded-xl py-3 pl-11 pr-4 text-[#3d1f00] placeholder-[#b09070] focus:outline-none focus:ring-2 focus:ring-[#ECB159] focus:border-transparent transition-all"
-                                    />
-                                </div>
-
-                                <button
-                                    type="submit"
-                                    disabled={loading}
-                                    className="w-full bg-[#ECB159] hover:bg-[#d49a3d] text-white py-3.5 rounded-xl font-bold transition-all active:scale-[0.98] shadow-sm mt-2 disabled:opacity-70 disabled:cursor-not-allowed"
-                                >
-                                    {loading ? "Processing..." : isLogin ? "Log In" : "Sign Up"}
-                                </button>
-                            </form>
-
-                            <div className="mt-8 relative flex items-center justify-center">
-                                <hr className="w-full border-[#e8d9c8]" />
-                                <span className="absolute bg-[#fdf6ec] px-4 text-[#b09070] text-xs font-bold uppercase tracking-wider">Or</span>
-                            </div>
-
-                            <button
-                                type="button"
-                                onClick={handleGoogleLogin}
-                                disabled={loading}
-                                className="w-full mt-6 bg-white border border-[#e8d9c8] hover:bg-[#fcf8f2] text-[#3d1f00] py-3.5 rounded-xl font-bold transition-all active:scale-[0.98] shadow-sm flex items-center justify-center gap-3 disabled:opacity-70 disabled:cursor-not-allowed"
-                            >
-                                <svg className="w-5 h-5" viewBox="0 0 24 24">
-                                    <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4" />
-                                    <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853" />
-                                    <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05" />
-                                    <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335" />
-                                    <path d="M1 1h22v22H1z" fill="none" />
-                                </svg>
-                                Continue with Google
-                            </button>
-
-                            <div className="mt-6 text-center">
-                                <p className="text-[#9e7c5a] text-sm">
-                                    {isLogin ? "Don't have an account?" : "Already have an account?"}{" "}
                                     <button
-                                        onClick={toggleMode}
-                                        type="button"
-                                        className="font-bold text-[#7a5c3e] hover:text-[#3d1f00] transition-colors"
+                                        type="submit"
+                                        disabled={loading || fullName.trim().length < 2}
+                                        className="w-full bg-[#3d1f00] hover:bg-[#2a1500] text-white py-3.5 rounded-xl font-bold transition-all active:scale-[0.98] shadow-sm mt-2 disabled:opacity-70 disabled:cursor-not-allowed"
                                     >
-                                        {isLogin ? "Sign Up" : "Log In"}
+                                        {loading ? "Saving..." : "Save My Name"}
                                     </button>
-                                </p>
-                            </div>
+                                </form>
+                            )}
+
                         </div>
                     </motion.div>
                 </>

@@ -1,6 +1,6 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { X, MapPin, Hash, User as UserIcon, Phone } from "lucide-react";
+import { X, MapPin, Hash, User as UserIcon, Phone, Percent } from "lucide-react";
 import { useCart, CartItem } from "../context/CartContext";
 import { useAuth } from "../context/AuthContext";
 import { supabase } from "../../lib/supabaseClient";
@@ -12,17 +12,29 @@ interface CheckoutModalProps {
 
 export function CheckoutModal({ isOpen, onClose }: CheckoutModalProps) {
     const { cartItems, cartTotal, setCartItems, setIsCartOpen } = useCart();
-    const { user } = useAuth();
+    const { user, profile, refreshProfile } = useAuth();
 
     const [orderType, setOrderType] = useState<"home_delivery" | "table_order">("home_delivery");
-    const [customerName, setCustomerName] = useState(user?.user_metadata?.full_name || "");
-    const [customerPhone, setCustomerPhone] = useState(user?.user_metadata?.phone_number || "");
+    const [customerName, setCustomerName] = useState("");
+    const [customerPhone, setCustomerPhone] = useState("");
     const [deliveryAddress, setDeliveryAddress] = useState("");
     const [tableNumber, setTableNumber] = useState("");
 
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [success, setSuccess] = useState(false);
+
+    // Apply 10% discount if they have the welcome reward (50 points)
+    const hasDiscount = profile?.loyalty_points && profile.loyalty_points >= 50;
+    const discountAmount = hasDiscount ? cartTotal * 0.10 : 0;
+    const finalTotal = cartTotal - discountAmount;
+
+    useEffect(() => {
+        if (profile) {
+            setCustomerName(profile.full_name || "");
+            setCustomerPhone(profile.phone || "");
+        }
+    }, [profile]);
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -50,7 +62,7 @@ export function CheckoutModal({ isOpen, onClose }: CheckoutModalProps) {
                     customer_phone: customerPhone,
                     delivery_address: orderType === 'home_delivery' ? deliveryAddress : null,
                     table_number: orderType === 'table_order' ? tableNumber : null,
-                    total_amount: cartTotal
+                    total_amount: finalTotal
                 })
                 .select()
                 .single();
@@ -76,6 +88,16 @@ export function CheckoutModal({ isOpen, onClose }: CheckoutModalProps) {
                 .insert(orderItemsData);
 
             if (itemsError) throw itemsError;
+
+            // 4. Consume Loyalty Points if used
+            if (hasDiscount) {
+                await supabase
+                    .from('profiles')
+                    .update({ loyalty_points: 0 })
+                    .eq('id', user.id);
+                // Refresh context profile to reflect 0 points
+                await refreshProfile();
+            }
 
             // Success cleanup
             setSuccess(true);
@@ -225,10 +247,25 @@ export function CheckoutModal({ isOpen, onClose }: CheckoutModalProps) {
                                     )}
 
                                     <div className="border-t border-[#e8d9c8] pt-4 mt-2">
-                                        <div className="flex items-center justify-between mb-4">
-                                            <span className="text-[#7a5c3e] font-medium">Total Amount</span>
-                                            <span className="text-[#3d1f00] font-bold text-xl">₹ {cartTotal}</span>
+                                        <div className="flex items-center justify-between mb-2">
+                                            <span className="text-[#7a5c3e] font-medium">Subtotal</span>
+                                            <span className="text-[#3d1f00] font-bold">₹ {cartTotal.toFixed(2)}</span>
                                         </div>
+
+                                        {hasDiscount && (
+                                            <div className="flex items-center justify-between mb-2 text-green-600 bg-green-50 p-2 rounded-lg border border-green-100">
+                                                <div className="flex items-center gap-1 text-sm font-bold">
+                                                    <Percent size={14} /> Welcome Reward (10%)
+                                                </div>
+                                                <span className="font-bold">- ₹ {discountAmount.toFixed(2)}</span>
+                                            </div>
+                                        )}
+
+                                        <div className="flex items-center justify-between mt-4 mb-4">
+                                            <span className="text-[#7a5c3e] font-bold">Total Payable</span>
+                                            <span className="text-[#3d1f00] font-bold text-2xl">₹ {finalTotal.toFixed(2)}</span>
+                                        </div>
+
                                         <button
                                             type="submit"
                                             disabled={loading}

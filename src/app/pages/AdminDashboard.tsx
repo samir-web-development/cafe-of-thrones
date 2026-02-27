@@ -4,22 +4,20 @@ import { useAuth } from "../context/AuthContext";
 import { Navigate } from "react-router-dom";
 import { Clock, CheckCircle2, Package, MapPin, Phone, User as UserIcon, RefreshCcw } from "lucide-react";
 
-// The allowed admin email
-const ADMIN_EMAIL = "samirgunjite26@gmail.com";
-
 export function AdminDashboard() {
-    const { user, loading: authLoading } = useAuth();
+    const { user, profile, loading: authLoading } = useAuth();
     const [orders, setOrders] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
 
     // 1. Check if user is the admin
-    if (!authLoading && user?.email !== ADMIN_EMAIL) {
+    // Do not redirect while auth is still loading to prevent flicker
+    if (!authLoading && (!user || !profile || profile.role !== 'admin')) {
         return <Navigate to="/" replace />;
     }
 
     // 2. Fetch Orders on mount
     useEffect(() => {
-        if (!user || user.email !== ADMIN_EMAIL) return;
+        if (!user || profile?.role !== 'admin') return;
 
         fetchOrders();
 
@@ -32,7 +30,7 @@ export function AdminDashboard() {
         return () => {
             supabase.removeChannel(ordersSubscription);
         };
-    }, [user]);
+    }, [user, profile]);
 
     const fetchOrders = async () => {
         try {
